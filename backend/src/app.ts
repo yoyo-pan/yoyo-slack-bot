@@ -109,21 +109,65 @@ function extractQuestion(mentionText: string, botUserId: string): string {
   return textWithoutMention
 }
 
+// Function to fetch channel members
+async function fetchChannelMembers(channelId: string, logger: any) {
+  try {
+    logger.info('Fetching channel members for channel:', channelId)
+
+    const result = await webClient.conversations.members({
+      channel: channelId,
+    })
+
+    logger.info(`Found ${result.members?.length || 0} members in channel`)
+
+    // Get detailed user information for each member
+    const memberDetails: { [key: string]: any } = {}
+
+    for (const userId of result.members || []) {
+      try {
+        const userInfo = await webClient.users.info({ user: userId })
+        memberDetails[userId] = {
+          id: userId,
+          name: userInfo.user?.name || userId,
+          real_name: userInfo.user?.real_name || userInfo.user?.name || userId,
+          is_bot: userInfo.user?.is_bot || false,
+        }
+      } catch (error) {
+        logger.error(`Error fetching user info for ${userId}:`, error)
+        memberDetails[userId] = { id: userId, name: userId, real_name: userId, is_bot: false }
+      }
+    }
+
+    return memberDetails
+  } catch (error) {
+    logger.error('Error fetching channel members:', error)
+    return {}
+  }
+}
+
 // Function to get answer from OpenAI based on user question
 async function getAnswerFromOpenAI(
   question: string,
   messages: any[],
   userNames: { [key: string]: string },
+  channelMembers: { [key: string]: any },
   logger: any
 ) {
   try {
     const formattedMessages = formatMessagesForOpenAI(messages, userNames)
 
-    const prompt = `Based on the following Slack messages from today, please answer this question: "${question}"
+    // Format channel members information
+    const formattedMembers = Object.values(channelMembers)
+      .filter((member) => !member.is_bot) // Exclude bots
+      .map((member) => `${member.real_name} (${member.name})`)
+      .join('\n')
 
-Focus on providing a direct, relevant answer to the question. If the question is about specific users or time periods, make sure to address those specifically.
+    const prompt = `Based on the following information, please answer this question: "${question}"
 
-Messages to analyze:
+Channel Members (${Object.values(channelMembers).filter((m) => !m.is_bot).length} users):
+${formattedMembers}
+
+Messages from today:
 ${formattedMessages}
 
 Please provide a clear, concise answer:`
@@ -134,7 +178,7 @@ Please provide a clear, concise answer:`
         {
           role: 'system',
           content:
-            'You are a helpful assistant that answers questions about Slack conversations. Provide direct, relevant answers based on the messages provided. If the question is about specific users or time periods, make sure to address those specifically.',
+            'You are a helpful assistant that answers questions about Slack conversations and channel information. Provide direct, relevant answers based on the messages and channel member information provided. If the question is about specific users, channel members, or time periods, make sure to address those specifically.',
         },
         {
           role: 'user',
@@ -207,6 +251,9 @@ slackApp.event('app_mention', async ({ event, say, logger }) => {
     // Fetch today's messages
     const messages = await fetchTodaysMessages(channelId, logger)
 
+    // Fetch channel members
+    const channelMembers = await fetchChannelMembers(channelId, logger)
+
     if (messages.length === 0) {
       await say({
         text: "I didn't find any messages from today to analyze.",
@@ -219,11 +266,11 @@ slackApp.event('app_mention', async ({ event, say, logger }) => {
     const userNames = await getUserNames(messages, logger)
 
     // Get answer from OpenAI based on the question
-    const answer = await getAnswerFromOpenAI(question, messages, userNames, logger)
+    const answer = await getAnswerFromOpenAI(question, messages, userNames, channelMembers, logger)
 
     // Send the answer
     await say({
-      text: answer,
+      text: `Here's the answer to your question: "${question}"\n\n${answer}`,
       thread_ts: ts,
     })
   } catch (error) {
