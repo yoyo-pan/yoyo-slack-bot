@@ -5,22 +5,17 @@ import OpenAI from 'openai'
 import express from 'express'
 import dotenv from 'dotenv'
 
-// Load environment variables
 dotenv.config()
 
-// Initialize Express app
 const expressApp = express()
 const port = process.env.PORT || 3000
 
-// Initialize OpenAI client
 const openai = new OpenAI({
   apiKey: process.env.OPENAI_API_KEY,
 })
 
-// Initialize Slack Web Client
 const webClient = new WebClient(process.env.SLACK_BOT_TOKEN)
 
-// Initialize Slack app
 const slackApp = new App({
   token: process.env.SLACK_BOT_TOKEN,
   signingSecret: process.env.SLACK_SIGNING_SECRET,
@@ -36,18 +31,6 @@ slackApp.event('*', async ({ event, logger }) => {
 // Debug: Log all incoming messages
 slackApp.message(async ({ message, logger }) => {
   logger.info('Received message:', JSON.stringify(message, null, 2))
-})
-
-// Listen for messages containing "hello"
-slackApp.message('hello', async ({ message, say, logger }) => {
-  logger.info('Hello message detected:', JSON.stringify(message, null, 2))
-  try {
-    await say({
-      text: 'Hey from bot 👋',
-    })
-  } catch (error) {
-    logger.error('Error sending message:', error)
-  }
 })
 
 // Function to get user names for messages
@@ -77,70 +60,6 @@ function formatMessagesForOpenAI(messages: any[], userNames: { [key: string]: st
       return `[${timestamp}] ${userName}: ${msg.text}`
     })
     .join('\n')
-}
-
-// Function to get summary from OpenAI
-async function getMessageSummary(messages: any[], userNames: { [key: string]: string }, logger: any) {
-  try {
-    const formattedMessages = formatMessagesForOpenAI(messages, userNames)
-
-    const prompt = `Please provide a comprehensive summary of the following Slack messages from today. 
-Focus on:
-1. Main topics discussed
-2. Key decisions made
-3. Action items or tasks
-4. Important updates or announcements
-
-Format the summary with clear sections and bullet points where appropriate.
-
-Messages to summarize:
-${formattedMessages}
-
-Please provide a well-structured summary:`
-
-    const completion = await openai.chat.completions.create({
-      model: 'gpt-4.1-nano', // Using GPT-4.1 nano for better cost-effectiveness
-      messages: [
-        {
-          role: 'system',
-          content:
-            'You are a professional communication assistant that creates clear, well-structured summaries of Slack conversations. Always format your response with proper sections, bullet points, and clear organization. Never cut off mid-sentence and always provide a complete summary.',
-        },
-        {
-          role: 'user',
-          content: prompt,
-        },
-      ],
-      temperature: 0.7,
-      max_tokens: 1000, // Increased token limit for more complete summaries
-      presence_penalty: 0.6,
-      frequency_penalty: 0.6,
-    })
-
-    console.log('YO~~~~~~~Completion is this', completion)
-
-    const summary = completion.choices[0].message.content
-
-    // Validate the summary
-    if (!summary || summary.length < 50) {
-      throw new Error('Generated summary is too short or empty')
-    }
-
-    return summary
-  } catch (error: any) {
-    logger.error('Error getting summary from OpenAI:', error)
-
-    // Handle specific OpenAI errors
-    if (error.status === 429) {
-      return "I'm sorry, but I've reached my API limit. Please try again later or contact the administrator to add billing information."
-    } else if (error.status === 401) {
-      return "I'm sorry, but there's an issue with my API authentication. Please contact the administrator."
-    } else if (error.message === 'Generated summary is too short or empty') {
-      return "I apologize, but I couldn't generate a proper summary. This might be because there weren't enough messages to summarize or the messages were too brief. Please try again with more messages."
-    } else {
-      return "I'm sorry, but I encountered an error while trying to summarize the messages. Please try again later."
-    }
-  }
 }
 
 // Function to fetch today's messages from a channel
@@ -177,6 +96,81 @@ async function fetchTodaysMessages(channelId: string, logger: any) {
   }
 }
 
+// Function to extract question from mention text
+function extractQuestion(mentionText: string, botUserId: string): string {
+  // Remove the bot mention from the text
+  const textWithoutMention = mentionText.replace(/<@[A-Z0-9]+>/, '').trim()
+
+  // If there's no text after the mention, return a default question
+  if (!textWithoutMention) {
+    return "Summarize today's messages"
+  }
+
+  return textWithoutMention
+}
+
+// Function to get answer from OpenAI based on user question
+async function getAnswerFromOpenAI(
+  question: string,
+  messages: any[],
+  userNames: { [key: string]: string },
+  logger: any
+) {
+  try {
+    const formattedMessages = formatMessagesForOpenAI(messages, userNames)
+
+    const prompt = `Based on the following Slack messages from today, please answer this question: "${question}"
+
+Focus on providing a direct, relevant answer to the question. If the question is about specific users or time periods, make sure to address those specifically.
+
+Messages to analyze:
+${formattedMessages}
+
+Please provide a clear, concise answer:`
+
+    const completion = await openai.chat.completions.create({
+      model: 'gpt-4.1-nano',
+      messages: [
+        {
+          role: 'system',
+          content:
+            'You are a helpful assistant that answers questions about Slack conversations. Provide direct, relevant answers based on the messages provided. If the question is about specific users or time periods, make sure to address those specifically.',
+        },
+        {
+          role: 'user',
+          content: prompt,
+        },
+      ],
+      temperature: 0.7,
+      max_tokens: 1000,
+      presence_penalty: 0.6,
+      frequency_penalty: 0.6,
+    })
+
+    const answer = completion.choices[0].message.content
+
+    // Validate the answer
+    if (!answer || answer.length < 20) {
+      throw new Error('Generated answer is too short or empty')
+    }
+
+    return answer
+  } catch (error: any) {
+    logger.error('Error getting answer from OpenAI:', error)
+
+    // Handle specific OpenAI errors
+    if (error.status === 429) {
+      return "I'm sorry, but I've reached my API limit. Please try again later or contact the administrator to add billing information."
+    } else if (error.status === 401) {
+      return "I'm sorry, but there's an issue with my API authentication. Please contact the administrator."
+    } else if (error.message === 'Generated answer is too short or empty') {
+      return "I apologize, but I couldn't generate a proper answer. This might be because there weren't enough messages to analyze or the messages were too brief. Please try again with more messages."
+    } else {
+      return "I'm sorry, but I encountered an error while trying to answer your question. Please try again later."
+    }
+  }
+}
+
 // Handle bot mentions
 slackApp.event('app_mention', async ({ event, say, logger }) => {
   try {
@@ -188,17 +182,26 @@ slackApp.event('app_mention', async ({ event, say, logger }) => {
     const text = event.text
     const ts = event.ts
 
+    // Extract the bot's user ID from the mention
+    const botMentionMatch = text.match(/<@([A-Z0-9]+)>/)
+    const botUserId = botMentionMatch ? botMentionMatch[1] : ''
+
+    // Extract the question from the mention text
+    const question = extractQuestion(text, botUserId)
+
     logger.info('Extracted data:', {
       channelId,
       userId,
       text,
       ts,
+      question,
     })
 
-    // Acknowledge the mention with a temporary message
-    await say({
-      text: `I received your mention! I'll analyze today's messages in this channel.`,
-      thread_ts: ts,
+    // React to the mention message with an emoji
+    await webClient.reactions.add({
+      channel: channelId,
+      timestamp: ts,
+      name: 'eyes', // This will add the 👀 emoji
     })
 
     // Fetch today's messages
@@ -206,7 +209,7 @@ slackApp.event('app_mention', async ({ event, say, logger }) => {
 
     if (messages.length === 0) {
       await say({
-        text: "I didn't find any messages from today to summarize.",
+        text: "I didn't find any messages from today to analyze.",
         thread_ts: ts,
       })
       return
@@ -215,12 +218,12 @@ slackApp.event('app_mention', async ({ event, say, logger }) => {
     // Get user names for the messages
     const userNames = await getUserNames(messages, logger)
 
-    // Get summary from OpenAI
-    const summary = await getMessageSummary(messages, userNames, logger)
+    // Get answer from OpenAI based on the question
+    const answer = await getAnswerFromOpenAI(question, messages, userNames, logger)
 
-    // Send the summary
+    // Send the answer
     await say({
-      text: `Here's a summary of today's messages:\n\n${summary}`,
+      text: answer,
       thread_ts: ts,
     })
   } catch (error) {
